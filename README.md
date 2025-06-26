@@ -10,7 +10,7 @@ We provided some MATLAB code in the visualization folder, where you can define y
 
 ![platform](visualization/platform.png)
     
-Inverse kinematics is well-defined (it can generate data for ANN and PINN training):
+Inverse kinematics is well-defined in the data file (it can generate data for ANN and PINN training):
 
     data.m
   
