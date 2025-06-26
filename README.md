@@ -27,3 +27,5 @@ After the training, you will get a model(.pth), then set a target length (.txt) 
 Back in the visualization folder, the results can be plotted:
 
     plot_result.m
+
+![result](visualization/result.png)
