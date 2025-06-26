@@ -439,8 +439,7 @@ def VTGS(LT1, LT2, LT3, LT4, LT5, LT6, XO1, YO2, ZO3, ChoiceAct, MentalSim, Wris
         final_length = [float(x) for x in final_length]
         print("\n Platform Poses: ",ang1,ang2,ang3,ang4,ang5,ang6)
         print("\n\n FINAL SOLUTION: ",final_length)
-        print("\n\n Error: ",np.linalg.norm(np.array(fin) - np.array(final_length)))
-        np.savetxt('results.txt', results, fmt='%f') #The file records the whole motion (Joint angles' change and end-effector's trajectory)
+        np.savetxt('results.txt', results, fmt='%f') #The file records the whole motion
         #time.sleep(1)
 
 def TargGenSMo(model):
