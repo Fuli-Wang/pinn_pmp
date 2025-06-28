@@ -20,7 +20,7 @@ Once data is generated, you can train a PINN model:
 
 # PMP implementation
 
-After the training, a model(.pth) will be obtained, then please set your target length (.txt) and run the following example to execute PM,P which will print and record the result (.txt)
+After the training, a model(.pth) will be obtained, then please set your target length (.txt) and run the following example to execute PMP, which will print and record the result (.txt)
 
     python3 pmp_parallel.py
 
