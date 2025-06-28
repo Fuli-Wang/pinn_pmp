@@ -4,7 +4,7 @@ Passive motion paradigm for parallel robots using self-supervised physics-inform
 # PINN training
 To implement the paradigm, the first step is to train the PINN model. 
 
-We provided some MATLAB code in the visualization folder, where you can define your platform and visualize it.  
+We provided some MATLAB code in the visualization folder, where user can define their platform and visualize it.  
 
     visualization.m
 
@@ -20,7 +20,7 @@ Once data is generated, you can train a PINN model:
 
 # PMP implementation
 
-After the training, you will get a model(.pth), then set a target length (.txt) and run the following example to excute PMP which will print and record the result (.txt)
+After the training, a model(.pth) will be obtained, then please set your target length (.txt) and run the following example to execute PM,P which will print and record the result (.txt)
 
     python3 pmp_parallel.py
 
