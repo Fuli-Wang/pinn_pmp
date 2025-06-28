@@ -8,9 +8,9 @@ z_platform  = 456;
 num_legs    = 6;
 pair_offset_deg = 15;       % ±7.5° per pair
 
-% Inpu a pose you want to see
-pose_input = [-0.16367666776497108 -0.6596727518850166 423.72335568362746 -7.069073827644413 7.809277820024048 -7.584001227298295]; % [X Y Z ]
-pose_input(:, 4:6) = deg2rad(pose_input(:, 4:6));
+% Input the pose you want to see
+pose_input = [-0.16367666776497108 -0.6596727518850166 423.72335568362746 -7.069073827644413 7.809277820024048 -7.584001227298295]; % [X Y Z roll, pitch, yaw] millimeter and degree
+pose_input(:, 4:6) = deg2rad(pose_input(:, 4:6)); % transfer degree to radian
 R = eul2rotm([pose_input(6), pose_input(5), pose_input(4)], 'ZYX');
 z_platform = pose_input(3);
 T = pose_input(1:3);
