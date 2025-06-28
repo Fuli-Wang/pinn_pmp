@@ -4,7 +4,7 @@ Passive motion paradigm for parallel robots using self-supervised physics-inform
 # PINN training
 To implement the paradigm, the first step is to train the PINN model. 
 
-We provided some MATLAB code in the visualization folder, where user can define their platform and visualize it.  
+We provided some MATLAB code in the visualization folder, where user can reuse and define their platform and visualize it.  
 
     visualization.m
 
