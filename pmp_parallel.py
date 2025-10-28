@@ -293,7 +293,7 @@ def _meta(a):
 def _parser():
     ap=argparse.ArgumentParser()
     ap.add_argument("--model",type=str,default="best_model.pth")
-    ap.add_argument("--target",type=float,nargs=6,default=[415.46, 433.71, 465.28, 484.94, 455.51, 463.25])
+    ap.add_argument("--target",type=float,nargs=6,default=[415.46, 433.71, 465.28, 484.94, 455.51, 463.25]) # put your target length here
     ap.add_argument("--pose0",type=float,nargs=6,default=POSE0_DEFAULT)
     ap.add_argument("--pose-ref",dest="pose_ref",type=float,nargs=6)
     ap.add_argument("--steps",type=int,default=ITERATION_DEFAULT)
@@ -324,5 +324,6 @@ def main():
     print("[info] done.")
 
 if __name__=="__main__": main()
+
 
 
