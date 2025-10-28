@@ -63,7 +63,7 @@ def generate_base_and_platform_points(
     num_legs = 6
     pair_offset = torch.deg2rad(torch.tensor(15.0, dtype=dtype, device=device))   # ±15°
     centers_base = torch.arange(3, dtype=dtype, device=device) * (2.0 * torch.pi / 3.0)
-    centers_plat = centers_base + (torch.pi / 3.0)  # 平台中心相对基座再偏 60°
+    centers_plat = centers_base + (torch.pi / 3.0)
 
     theta_b = torch.empty(num_legs, dtype=dtype, device=device)
     theta_p = torch.empty(num_legs, dtype=dtype, device=device)
@@ -325,3 +325,4 @@ def main():
     print("[info] done.")
 
 if __name__=="__main__": main()
+
