@@ -182,7 +182,7 @@ def _append_row_to_table(row_dict, fname="setpoint_table.csv"):
         "mapping","kp_or_vec","lam2","bq_diag","kq",
         "dt","steps","submv_T","traj","model"
     ]
-    # 生成一行
+
     vals = []
     vals += list(row_dict["tar_L"])
     vals += list(row_dict["ik_L"])
@@ -194,7 +194,6 @@ def _append_row_to_table(row_dict, fname="setpoint_table.csv"):
         " ".join(map(str, row_dict["bq_diag"])), " ".join(map(str, row_dict["kq"])),
         row_dict["dt"], row_dict["steps"], row_dict["submv_T"], row_dict["traj"], row_dict["model"]
     ]
-
     need_header = not os.path.exists(fname)
     with open(fname, "a", encoding="utf-8") as f:
         if need_header:
@@ -325,4 +324,5 @@ def main():
     print("[info] done.")
 
 if __name__=="__main__": main()
+
 
