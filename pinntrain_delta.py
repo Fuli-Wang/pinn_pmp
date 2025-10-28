@@ -108,7 +108,7 @@ def synthesize_poses(n: int = 300000) -> np.ndarray:
 def main():
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--num-data", type=int, default=500000, help="合成样本数")
+    ap.add_argument("--num-data", type=int, default=500000)
     ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--epochs", type=int, default=200)
     ap.add_argument("--hidden-dim", type=int, default=256)
@@ -187,5 +187,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
