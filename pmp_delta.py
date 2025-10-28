@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 PMP controller for Delta robot (3-DoF, KR 3 D1200 compatible)
-- Loads a trained PINN: input T=[x,y,z] -> output L=[L1,L2,L3]
-- Uses min-jerk timing, explicit Euler integration, pose-space damping
+- Loads a trained PINN
+- Uses min-jerk timing, explicit Euler integration, and pose-space damping
 
-  • After the run, compute leg lengths again via analytic FK from final pose
+  • After the run, compute leg lengths again via analytic FK from the final pose
     (using the same KR3-D1200 geometry as in pinntrain_delta.py), and print
     side-by-side with the model-predicted lengths, plus errors and RMSE.
   • Append L_fk1..L_fk3 to results_head.csv for auditing.
