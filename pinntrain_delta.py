@@ -95,8 +95,8 @@ def custom_loss(pred_lengths: torch.Tensor, platform_points_global: torch.Tensor
 # ================== Data for training ==================
 def synthesize_poses(n: int = 300000) -> np.ndarray:
     """
-    合成 (tx,ty,tz)[mm]：
-      x,y ∈ [-150,150], z ∈ [-500,-100]  (Delta: 基座在上, 平台在下)
+    generate (tx,ty,tz)[mm]：
+      x,y ∈ [-150,150], z ∈ [-500,-100]
     """
     rng = np.random.default_rng(42)
     x = rng.uniform(-150.0, 150.0, size=(n, 1)).astype(np.float32)
@@ -187,4 +187,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
