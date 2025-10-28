@@ -1,467 +1,327 @@
-import torch
-import torch.nn as nn
-from torch.nn import functional as F
-import numpy as np
-import torch.autograd
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Parallel robot controller — Robot #3 (Hexagonal skew type)
+# This script implements the proposed PINN-PMP framework used in our paper.
+# It records all motion and evaluation data (joint/leg trajectories, reference
+# values, tracking errors, and control signals) into CSV files for analysis.
+# These additional evaluations increase the total runtime compared to a
+# standard motion generation loop.
+======================================================================
+Geometry & initial pose taken from legacy pmp_parallel.py:
+  base_radius=225, platform_radius=175, z_platform=456,
+  shape='hexagonal', pair_offset_deg=15°, l_ini=483.2198 mm.
 
-# Kompliance
-KFORCE = 50
-ITERATION=1000
-RAMP_KONSTANT=0.005
-RAMP_KONSTANT_Euler=0.001
-t_dur=5
-J2H=1;
+Outputs
+-------
+- results.txt        -> pose(6)+L(6)
+- results_head.csv   -> full log with meta header
+"""
 
-inputL=6
-outputL=6
+import argparse, os, numpy as np, torch, torch.nn as nn
 
-base_radius = 225
-platform_radius = 175
-hexagon_skew = 0.0
-z_base = 0.0
-z_platform = 456
-shape = 'hexagonal'
+# ===== Robot parameters =====
+BASE_RADIUS_DEF, PLATFORM_RADIUS_DEF = 225.0, 175.0
+Z_BASE_DEF, Z_PLATFORM_DEF = 0.0, 456.0
+POSE0_DEFAULT = [0.0, 0.0, Z_PLATFORM_DEF, 0.0, 0.0, 0.0]
+INIT_LEG_LEN = 483.2198
 
-def compute_batch_rotation_matrix(euler_angles):
-    """
-    Compute batch rotation matrices from Euler angles (ZYX convention).
-    Input:  [batch_size, 3] -> roll (x), pitch (y), yaw (z)
-    Output: [batch_size, 3, 3] rotation matrices
-    """
-    roll  = euler_angles[:, 0]  # rotation around x-axis
-    pitch = euler_angles[:, 1]  # rotation around y-axis
-    yaw   = euler_angles[:, 2]  # rotation around z-axis
+ITERATION_DEFAULT, DT_DEFAULT, SUBMV_T_DEFAULT = 1000, 0.004, 1.2
+KP_DEF_SCALAR, BQ_DIAG_DEFAULT, LAM2_DEFAULT = 100.0, [0.08,0.08,0.08,0.06,0.06,0.06], 1e-4
+KQ_DEFAULT = [0,0,0,0.0,0.0,0.0]
+TRAJ_DEF = "minjerk"
 
-    # Compute cosines and sines
-    cos_r = torch.cos(roll)
-    sin_r = torch.sin(roll)
-    cos_p = torch.cos(pitch)
-    sin_p = torch.sin(pitch)
-    cos_y = torch.cos(yaw)
-    sin_y = torch.sin(yaw)
+# ===== Helper functions =====
+def _model_device(model):
+    try: return next(model.parameters()).device
+    except StopIteration: return torch.device("cpu")
 
-    # Rotation matrices components
-    batch_size = euler_angles.shape[0]
+def min_jerk_s(t,T): tau=np.clip(t/max(T,1e-9),0,1); return 10*tau**3-15*tau**4+6*tau**5
+def dls_pinv(J,lam2=1e-4): JT=J.T; I=np.eye(J.shape[0]); return JT@np.linalg.inv(J@JT+lam2*I)
 
-    R = torch.zeros((batch_size, 3, 3), dtype=euler_angles.dtype, device=euler_angles.device)
+# ===== Geometry & model =====
+def compute_batch_rotation_matrix(euler):
+    r,p,y=euler[:,0],euler[:,1],euler[:,2]
+    cr,sr,cp,sp,cy,sy=torch.cos(r),torch.sin(r),torch.cos(p),torch.sin(p),torch.cos(y),torch.sin(y)
+    B=euler.shape[0]; R=torch.zeros((B,3,3),dtype=euler.dtype,device=euler.device)
+    R[:,0,0]=cy*cp; R[:,0,1]=cy*sp*sr-sy*cr; R[:,0,2]=cy*sp*cr+sy*sr
+    R[:,1,0]=sy*cp; R[:,1,1]=sy*sp*sr+cy*cr; R[:,1,2]=sy*sp*cr-cy*sr
+    R[:,2,0]=-sp;  R[:,2,1]=cp*sr;  R[:,2,2]=cp*cr; return R
 
-    R[:, 0, 0] = cos_y * cos_p
-    R[:, 0, 1] = cos_y * sin_p * sin_r - sin_y * cos_r
-    R[:, 0, 2] = cos_y * sin_p * cos_r + sin_y * sin_r
+def generate_base_and_platform_points(
+    base_radius=BASE_RADIUS_DEF,
+    platform_radius=PLATFORM_RADIUS_DEF,
+    z_base=Z_BASE_DEF,
+    z_platform=Z_PLATFORM_DEF,
+    device=None,
+):
+    """Generate base/platform anchor points for hexagonal-pair layout with ±15° offsets."""
+    dtype = torch.float32
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    R[:, 1, 0] = sin_y * cos_p
-    R[:, 1, 1] = sin_y * sin_p * sin_r + cos_y * cos_r
-    R[:, 1, 2] = sin_y * sin_p * cos_r - cos_y * sin_r
+    num_legs = 6
+    pair_offset = torch.deg2rad(torch.tensor(15.0, dtype=dtype, device=device))   # ±15°
+    centers_base = torch.arange(3, dtype=dtype, device=device) * (2.0 * torch.pi / 3.0)
+    centers_plat = centers_base + (torch.pi / 3.0)  # 平台中心相对基座再偏 60°
 
-    R[:, 2, 0] = -sin_p
-    R[:, 2, 1] = cos_p * sin_r
-    R[:, 2, 2] = cos_p * cos_r
+    theta_b = torch.empty(num_legs, dtype=dtype, device=device)
+    theta_p = torch.empty(num_legs, dtype=dtype, device=device)
 
-    return R
+    idx = 0
+    for cb, cp in zip(centers_base, centers_plat):
+        theta_b[idx]   = cb - pair_offset / 2
+        theta_b[idx+1] = cb + pair_offset / 2
+        theta_p[idx]   = cp - pair_offset / 2
+        theta_p[idx+1] = cp + pair_offset / 2
+        idx += 2
 
-# Generate points
-def generate_base_and_platform_points(platform_shape, base_radius, platform_radius, hexagon_skew, z_base, z_platform, num_legs=6):
-    """
-    Generate base and platform points arranged in a circle, with platform points skewed.
-    """
-    if platform_shape == 'circle':
-        print("circle")
-        theta_base = torch.linspace(0, 2 * torch.pi, num_legs + 1)[:-1]
-        theta_platform = theta_base + hexagon_skew #uniform distribution
-        #theta_skewed_deg = torch.tensor([15, 45, 135, 165, 255, 285], dtype=torch.float32)
-        #theta_platform = theta_skewed_deg * torch.pi / 180.0  # convert to radians
+    theta_b = torch.remainder(theta_b, 2.0 * torch.pi)
+    theta_p = torch.remainder(theta_p, 2.0 * torch.pi)
+    theta_b, _ = torch.sort(theta_b)
+    theta_p, _ = torch.sort(theta_p)
 
-    else: # Generate base and platform points for a Stewart Platform with hexagonal skew applied to platform points.
-        print("hexagonal")
-        # Compute base pair centers: for num_legs=6, these will be 0, 2π/3, 4π/3.
-        base_pair_centers = torch.linspace(0, 2 * torch.pi, num_legs // 2 + 1)[:-1]
-        # Platform pair centers are the base pair centers shifted by hexagon_skew.
-        platform_pair_centers = base_pair_centers + torch.pi/3
-
-        pair_offset_deg = 15
-
-        # Compute angles for each leg in pairs
-        pair_offset_rad = torch.deg2rad(torch.tensor(pair_offset_deg))
-        theta_base = []
-        theta_platform = []
-        for base_center, plat_center in zip(base_pair_centers, platform_pair_centers):
-            theta_base.extend([base_center - pair_offset_rad / 2, base_center + pair_offset_rad / 2])
-            theta_platform.extend([plat_center - pair_offset_rad / 2, plat_center + pair_offset_rad / 2])
-
-        theta_base = torch.tensor(theta_base, dtype=torch.float32)
-        theta_platform = torch.tensor(theta_platform, dtype=torch.float32)
-
-        theta_base = torch.remainder(theta_base, 2 * torch.pi)
-        theta_platform = torch.remainder(theta_platform, 2 * torch.pi)
-        theta_base, _ = torch.sort(theta_base)
-        theta_platform, _ = torch.sort(theta_platform)
-
-    # Generate base points
-    base_points = torch.stack([
-        base_radius * torch.cos(theta_base),
-        base_radius * torch.sin(theta_base),
-        z_base * torch.ones(num_legs)
+    base = torch.stack([
+        torch.tensor(base_radius,    dtype=dtype, device=device) * torch.cos(theta_b),
+        torch.tensor(base_radius,    dtype=dtype, device=device) * torch.sin(theta_b),
+        torch.tensor(z_base,         dtype=dtype, device=device).expand(num_legs),
     ], dim=1)
 
-    platform_points = torch.stack([
-        platform_radius * torch.cos(theta_platform),
-        platform_radius * torch.sin(theta_platform),
-        z_platform * torch.ones(num_legs)
+    plat = torch.stack([
+        torch.tensor(platform_radius, dtype=dtype, device=device) * torch.cos(theta_p),
+        torch.tensor(platform_radius, dtype=dtype, device=device) * torch.sin(theta_p),
+        torch.tensor(z_platform,      dtype=dtype, device=device).expand(num_legs),
     ], dim=1)
 
-    return base_points, platform_points
+    plat[:, 2] = 0.0
+    return base, plat
 
-base_points, platform_points = generate_base_and_platform_points(
-    shape, base_radius, platform_radius, hexagon_skew, z_base, z_platform
-)
-platform_points[:, 2] = 0.0  # platform local frame: z = 0
-platform_points_centered = platform_points - platform_points.mean(dim=0, keepdim=True)  # center x/y
 
-#claim model
-num_neurons = 256
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+base_points, platform_points = generate_base_and_platform_points(device=device)
+platform_points_centered = platform_points - platform_points.mean(dim=0, keepdim=True)
 
-# Define the pinn model in PyTorch
+
 class PMP(nn.Module):
-    def __init__(self, num_legs=6, platform_points=platform_points_centered, hidden_dim=256):
-        super(PMP, self).__init__()
-        self.num_legs = num_legs
-        self.register_buffer('platform_points_local', platform_points)
-
-        self.fc_output = nn.Sequential(
-            nn.Linear(num_legs * 3, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),  # New hidden layer
-            nn.SiLU(),
-            nn.Linear(hidden_dim, num_legs),
-            nn.Softplus()             # Final ReLU or Softplus activation to ensure non-negative outputs
-        )
-
+    def __init__(self,num_legs=6,hidden_dim=256):
+        super().__init__()
+        self.register_buffer("platform_points_local",platform_points_centered)
+        self.fc_output=nn.Sequential(nn.Linear(num_legs*3,hidden_dim),nn.SiLU(),
+                                     nn.Linear(hidden_dim,hidden_dim),nn.SiLU(),
+                                     nn.Linear(hidden_dim,num_legs),nn.Softplus())
     def forward(self, pose_candidate):
+        #dtype / device
+        dtype = pose_candidate.dtype
+        device = pose_candidate.device
 
         translation = pose_candidate[:, :3]
-        euler_angles_deg = pose_candidate[:, [3, 4, 5]]      # roll, pitch, yaw (swap order to ZYX)
-        euler_angles = torch.deg2rad(euler_angles_deg)  # convert to radians
-        R = compute_batch_rotation_matrix(euler_angles)
+        euler_deg   = pose_candidate[:, 3:6]
+        euler_rad   = torch.deg2rad(euler_deg).to(dtype=dtype, device=device)
 
-        batch_size = pose_candidate.shape[0]
+        R = compute_batch_rotation_matrix(euler_rad)     # [B,3,3]
+        B = pose_candidate.shape[0]
 
-        platform_points_rotated = torch.bmm(R, self.platform_points_local.unsqueeze(0).expand(batch_size, -1, -1).transpose(1, 2)).transpose(1, 2)
+        pts_local = self.platform_points_local.to(dtype=dtype, device=device)
+        pts_local = pts_local.unsqueeze(0).expand(B, -1, -1)         # [B,6,3]
 
-        platform_points_global = platform_points_rotated + translation.unsqueeze(1)
-
-        platform_points_flat = platform_points_global.reshape(platform_points_global.size(0), -1)
-        lengths = self.fc_output(platform_points_flat)
-
+        pts_rot = torch.bmm(R, pts_local.transpose(1, 2)).transpose(1, 2)  # [B,6,3]
+        pts_global = pts_rot + translation.unsqueeze(1)
+        flat = pts_global.reshape(B, -1)
+        lengths = self.fc_output(flat)
         return lengths
 
-    def get_jacobian(self, inputs):
-        inputs = inputs.requires_grad_()
-        jac = torch.autograd.functional.jacobian(self.forward, inputs, vectorize=False)
-        batch_size = inputs.size(0)
-        diag_jac = jac[torch.arange(batch_size), :, torch.arange(batch_size)]
-        return diag_jac
+    def get_jacobian(self,x):
+        x=x.detach().clone().requires_grad_(True); y=self.forward(x)
+        rows=[torch.autograd.grad(y[0,i],x,retain_graph=True)[0][0] for i in range(6)]
+        return torch.stack(rows,0)
 
-#put the Initial position of the platform
+# ===== Initialization =====
 def InitializeJan():
-    Pose = np.zeros(6)
-    Pose[2] = 456
+    Pose=np.array(POSE0_DEFAULT); L_iniIC=np.full(6,INIT_LEG_LEN); L_ini=L_iniIC.copy()
+    return Pose,*Pose.tolist(),*L_iniIC.tolist(),*L_ini.tolist()
 
-    poseini0 = 0
-    poseini1 = 0
-    poseini2 = 456
-    poseini3 = 0
-    poseini4 = 0
-    poseini5= 0
+def geom_lengths_from_pose(pose_tensor):
+    dtype = pose_tensor.dtype
+    dev = pose_tensor.device
+    t = pose_tensor[:3]  # x,y,z
+    euler_deg = pose_tensor[3:6]
+    euler_rad = torch.deg2rad(euler_deg).to(dtype=dtype, device=dev)
 
-    l1_iniIC= 483.2198
-    l2_iniIC= 483.2198
-    l3_iniIC= 483.2198
-    l4_iniIC= 483.2198
-    l5_iniIC= 483.2198
-    l6_iniIC= 483.2198
+    R = compute_batch_rotation_matrix(euler_rad.unsqueeze(0))[0]  # [3,3]
+    pts_local = platform_points_centered.to(dtype=dtype, device=dev)          # [6,3]
+    pts_rot   = (R @ pts_local.T).T                                           # [6,3]
+    pts_world = pts_rot + t                                                   # [6,3]
 
-    l1_ini = 483.2198
-    l2_ini = 483.2198
-    l3_ini = 483.2198
-    l4_ini = 483.2198
-    l5_ini = 483.2198
-    l6_ini = 483.2198
+    base = base_points.to(dtype=dtype, device=dev)                            # [6,3]
+    diffs = pts_world - base
+    lens  = torch.linalg.norm(diffs, dim=1)                                   # [6]
+    return lens
 
-    return Pose, poseini0, poseini1, poseini2, poseini3, poseini4, poseini5, l1_iniIC, l2_iniIC, l3_iniIC, l4_iniIC, l5_iniIC, l6_iniIC, l1_ini, l2_ini, l3_ini, l4_ini, l5_ini, l6_ini
 
-def inverse_kinematics(q, model):
-    # Convert input to a PyTorch tensor
-    u = torch.tensor(q, dtype=torch.float32).unsqueeze(0)
-    # Set the model to evaluation mode
-    model.eval()
-    # Forward pass through the model
+def _metrics_setpoint(e_set):
+    abs_e = np.abs(e_set)
+    rmse  = float(np.sqrt(np.mean(e_set**2)))
+    mae   = float(np.mean(abs_e))
+    mabs  = float(np.max(abs_e))
+    l2    = float(np.linalg.norm(e_set, ord=2))
+    return rmse, mae, mabs, l2
+
+
+def _append_row_to_table(row_dict, fname="setpoint_table.csv"):
+    cols = [
+        # target
+        *[f"tar_L{i+1}" for i in range(6)],
+        # IK legs
+        *[f"ik_L{i+1}"  for i in range(6)],
+        # error
+        *[f"e_set{i+1}" for i in range(6)],
+        "RMSE","MAE","MaxAbs","L2","condJ",
+        # pose
+        "x","y","z","roll","pitch","yaw",
+        # control/meta
+        "mapping","kp_or_vec","lam2","bq_diag","kq",
+        "dt","steps","submv_T","traj","model"
+    ]
+    # 生成一行
+    vals = []
+    vals += list(row_dict["tar_L"])
+    vals += list(row_dict["ik_L"])
+    vals += list(row_dict["e_set"])
+    vals += [row_dict["RMSE"], row_dict["MAE"], row_dict["MaxAbs"], row_dict["L2"], row_dict["condJ"]]
+    vals += list(row_dict["pose"])
+    vals += [
+        row_dict["mapping"], row_dict["kp_or_vec"], row_dict["lam2"],
+        " ".join(map(str, row_dict["bq_diag"])), " ".join(map(str, row_dict["kq"])),
+        row_dict["dt"], row_dict["steps"], row_dict["submv_T"], row_dict["traj"], row_dict["model"]
+    ]
+
+    need_header = not os.path.exists(fname)
+    with open(fname, "a", encoding="utf-8") as f:
+        if need_header:
+            f.write(",".join(cols) + "\n")
+        f.write(",".join(str(v) for v in vals) + "\n")
+
+# ===== Control core =====
+def core_step(pose,L_ref,model,args):
+    device=pose.device
     with torch.no_grad():
-        a = model(u)
-    # Convert the result to a NumPy array
-    x = a.numpy()
-    return x[0]
+        L_cur_t = geom_lengths_from_pose(pose)      # torch[6]
+        L_cur   = L_cur_t.detach().cpu().numpy()           # np[6]
+    Kp=np.diag(args.kp_vec) if args.kp_vec is not None else np.eye(6)*args.kp
+    F=Kp@(np.asarray(L_ref)-L_cur)
+    J=model.get_jacobian(pose.unsqueeze(0)).cpu().numpy()
+    if args.use_jt: qdot=J.T@F; N=np.eye(6)-J.T@np.linalg.pinv(J)
+    else: Jp=dls_pinv(J,args.lam2); qdot=Jp@F; N=np.eye(6)-(Jp@J)
+    q=np.array(pose.cpu()); q_post=np.array(args.pose_ref or args.pose0)
+    Kq=np.diag(args.kq); qdot_post=N@(Kq@(q_post-q))
+    BQ=np.diag(args.bq_diag); qdot=(np.eye(6)-BQ)@(qdot+qdot_post)
+    return pose+torch.tensor(qdot*args.dt,dtype=pose.dtype,device=device),L_cur,F,qdot
 
-def forcefield(w,v):
-    j = 0
-    length = np.zeros(6)
-    tar = np.zeros(6)
-    res = np.zeros(6)
-    for j in range(6):
-        length[j] = w[j]
-        tar[j] = v[j]
-        res[j] = KFORCE * (tar[j] - length[j])
-    ptr = res
-    return ptr
+# ===== Controller runner =====
+def run_controller(model,args,target_lengths):
+    device=_model_device(model)
+    pose = torch.tensor(np.array(args.pose0, dtype=np.float32), device=device)
+    with torch.no_grad():
+        L0_t = geom_lengths_from_pose(pose)      # torch[6]
+        L0 = L0_t.detach().cpu().numpy()           # np[6]
+    logs=[];
+    for i in range(args.steps):
+        t=i*args.dt; s=min_jerk_s(t,args.submv_T)
+        L_ref=L0+s*(np.array(target_lengths)-L0)
+        pose,L_cur,F,qdot=core_step(pose,L_ref,model,args)
+        logs.append([t,*L_cur,*L_ref,*F,*qdot,*pose.cpu().numpy()])
+    arr=np.asarray(logs)
+    np.savetxt("results_h.txt",np.hstack([arr[:,-6:],arr[:,1:7]]),fmt="%f")
+    header=_meta(args)+"\n"+_csv_head()
+    np.savetxt("results_head.csv",arr,fmt="%f",header=header,comments="")
+    err = np.linalg.norm(np.array(target_lengths) - L_cur)
+    print("[info] Simulation completed.")
+    print(f"[info] Final pose (mm,deg): {pose.cpu().numpy()}")
+    print(f"[info] Final leg lengths (NN, mm): {L_cur}")
+    print(f"[info] Target leg lengths (mm): {target_lengths}")
+    print(f"[info] Final leg-length error (NN vs target) L2 = {err:.6f} mm")
 
-def pmp(force, Pose, model):
-    ff = np.zeros(6)
-    Joint_Field = np.zeros(6)
-    Jvel = np.zeros(6)
+    with torch.no_grad():
+        L_ik = geom_lengths_from_pose(pose).cpu().numpy()   # [6]
 
-    for i in range(6):
-        ff[i] = force[i]
+    e_set = L_ik - np.array(target_lengths)                 # 6-dim setpoint error
+    rmse, mae, mabs, l2 = _metrics_setpoint(e_set)
 
-    JacT =[]
-
-    torch_pose = torch.tensor(Pose, dtype=torch.float32, requires_grad=True).unsqueeze(0)
-    #model.eval()
-    jacobian = model.get_jacobian(torch_pose)
-
-    Jack = np.squeeze(jacobian.numpy())
-
-    JacT = Jack.T
-
-    Joint_Field[0]=(0-Pose[0])*J2H;# 45 25
-    Joint_Field[1]=(0-Pose[1])*J2H; # J2H = 1
-    Joint_Field[2]=(456-Pose[2])*J2H;
-    Joint_Field[3]=(0-Pose[3])*J2H*1; #50  5
-    Joint_Field[4]=(0-Pose[4])*J2H*1;#50  75
-    Joint_Field[5]=(0-Pose[5])*J2H*1; #was 30   100
-
-    for a in range(inputL):
-        jvelo = 0
-        for n in range(outputL):
-            jvelo = jvelo+(JacT[a][n]*ff[n])
-        Jvel[a] = 0.002*(jvelo+ Joint_Field[a])
-
-    foof = Jvel
-    return foof
-
-
-def GammaDisc(_Time):
-    t_ramp=(_Time)*RAMP_KONSTANT
-    t_init=0.1
-    z=(t_ramp-t_init)/t_dur
-    t_win=(t_init+t_dur)-t_ramp
-
-    if t_win>0:
-        t_window=1
-    else:
-        t_window=0
-    csi=(6*pow(z,5))-(15*pow(z,4))+(10*pow(z,3)) #6z^5-15z^4+10z^3
-    csi_dot=(30*pow(z,4))-(60*pow(z,3))+(30*pow(z,2)) #csi_dot=30z^4-60z^3+30z^2
-    prod1=(1/(1.0001-(csi*t_window)))
-    prod2=(csi_dot*(1/3)*t_window)
-    Gamma=prod1*prod2
-
-    return Gamma
-
-def Gamma_IntDisc(Gar, n):
-    k = 1
-    a = 0
-    sum =Gar[0]
-    c = 2
-    h = 1
-    while k <= (n-1):
-        fk = Gar[k]
-        c = 6-c
-        sum = (sum + c*fk)
-        k += 1
-    sum=RAMP_KONSTANT*sum/3
-
-    return sum
-
-def Gamma_IntDisc_Euler(Gar, n):
-    return RAMP_KONSTANT_Euler * np.sum(Gar[:n])
-
-def MotCon(L1, L2, L3, L4, L5, L6, time, Gam, Pose, q1, q2, q3, q4, q5, q6, janini0, janini1, janini2, janini3, janini4, janini5, model):
-    ang = Pose
-    nFK = inverse_kinematics(ang, model)
-    X_pos = np.zeros(6)
-    target = np.zeros(6)
-
-    for i in range(6):
-        X_pos[i] = nFK[i]
-    po = X_pos
-
-    target[0]=L1
-    target[1]=L2
-    target[2]=L3
-    target[3]=L4
-    target[4]=L5
-    target[5]=L6
-
-    ta = target
-    force = forcefield(po,ta)
-
-    ffield = np.zeros(6)
-    for i in range(6):
-        ffield[i] = force[i]
-    topmp= ffield
-    Q_Dot=pmp(topmp, Pose, model)
-
-    JoVel = np.zeros(6)
-    for i in range(6):
-        JoVel[i]=(Q_Dot[i])*Gam
-
-    q1[time]=JoVel[0]
-    j1=q1
-    joi1=Gamma_IntDisc(j1,time)
-    Pose[0]=joi1+janini0
-
-    q2[time]=JoVel[1]
-    j2=q2
-    joi2=Gamma_IntDisc(j2,time)
-    Pose[1]=joi2+janini1
-
-    q3[time]=JoVel[2]
-    j3=q3
-    joi3=Gamma_IntDisc(j3,time)
-    Pose[2]=joi3+janini2
-
-    q4[time]=JoVel[3]
-    j4=q4
-    joi4=Gamma_IntDisc(j4,time)
-    Pose[3]=joi4+janini3
-
-    q5[time]=JoVel[4]
-    j5=q5
-    joi5=Gamma_IntDisc(j5,time)
-    Pose[4]=joi5+janini4
-
-    q6[time]=JoVel[5]
-    j6=q6
-    joi6=Gamma_IntDisc(j6,time)
-    Pose[5]=joi6+janini5 #(joi6+janini5+ np.pi) % (2 * np.pi) - np.pi
-
-    return Pose, X_pos, q1, q2, q3, q4, q5,q6
-
-def VTGS(LT1, LT2, LT3, LT4, LT5, LT6, XO1, YO2, ZO3, ChoiceAct, MentalSim, WristGraspPose, model):
-
-    results = []
-
-    Pose, janini0, janini1, janini2, janini3, janini4, janini5, l1_iniIC, l2_iniIC, l3_iniIC, l4_iniIC, l5_iniIC, l6_iniIC, l1_ini, l2_ini, l3_ini, l4_ini, l5_ini, l6_ini = InitializeJan()
-
-    fin = np.zeros(6)
-    n = 6
-    retvalue=0
-
-    if ChoiceAct==0:
-
-        fin = [LT1, LT2, LT3, LT4, LT5, LT6]
-
-        replan=0
-
-        l1_fin=fin[0]
-        l2_fin=fin[1]
-        l3_fin=fin[2]
-        l4_fin=fin[3]
-        l5_fin=fin[4]
-        l6_fin=fin[5]
-
-        print(" Targets")
-        print(l1_fin,l2_fin,l3_fin,l4_fin,l5_fin,l6_fin)
-
-        Gam_Arr1 = np.zeros(ITERATION)
-        Gam_Arr2 = np.zeros(ITERATION)
-        Gam_Arr3 = np.zeros(ITERATION)
-        Gam_Arr4 = np.zeros(ITERATION)
-        Gam_Arr5 = np.zeros(ITERATION)
-        Gam_Arr6 = np.zeros(ITERATION)
-
-        q1 = np.zeros(ITERATION)
-        q2 = np.zeros(ITERATION)
-        q3 = np.zeros(ITERATION)
-        q4 = np.zeros(ITERATION)
-        q5 = np.zeros(ITERATION)
-        q6 = np.zeros(ITERATION)
-
-        final_length = np.zeros(n)
-
-        for time in range(ITERATION):
-            Gam=GammaDisc(time);
-
-            #Target Generation
-
-            inter_l1=(l1_fin-l1_ini)*Gam
-            Gam_Arr1[time]=inter_l1
-            Gar1=Gam_Arr1
-            l1_ini=Gamma_IntDisc(Gar1,time)+l1_iniIC
-
-            inter_l2=(l2_fin-l2_ini)*Gam
-            Gam_Arr2[time]=inter_l2
-            Gar2=Gam_Arr2
-            l2_ini=Gamma_IntDisc(Gar2,time)+l2_iniIC
-
-            inter_l3=(l3_fin-l3_ini)*Gam
-            Gam_Arr3[time]=inter_l3
-            Gar3=Gam_Arr3
-            l3_ini=Gamma_IntDisc(Gar3,time)+l3_iniIC
-
-            inter_l4=(l4_fin-l4_ini)*Gam
-            Gam_Arr4[time]=inter_l4
-            Gar4=Gam_Arr4
-            l4_ini=Gamma_IntDisc(Gar4,time)+l4_iniIC
-
-            inter_l5=(l5_fin-l5_ini)*Gam
-            Gam_Arr5[time]=inter_l5
-            Gar5=Gam_Arr5
-            l5_ini=Gamma_IntDisc(Gar5,time)+l5_iniIC
-
-            inter_l6=(l6_fin-l6_ini)*Gam
-            Gam_Arr6[time]=inter_l6
-            Gar6=Gam_Arr6
-            l6_ini=Gamma_IntDisc(Gar6,time)+l6_iniIC
-
-            Pose, X_pos, q1, q2, q3, q4, q5, q6 = MotCon(l1_ini, l2_ini, l3_ini, l4_ini, l5_ini, l6_ini, time, Gam, Pose, q1, q2, q3, q4, q5, q6, janini0, janini1, janini2, janini3, janini4, janini5, model)
-
-            results.append([Pose[0],Pose[1],Pose[2],Pose[3],Pose[4],Pose[5],l1_ini, l2_ini, l3_ini, l4_ini, l5_ini, l6_ini])
-
-        final_length =[X_pos[0],X_pos[1],X_pos[2],X_pos[3],X_pos[4],X_pos[5]]
-
-        konst=1
-        ang1=konst*Pose[0]
-        ang2=konst*Pose[1]
-        ang3=konst*Pose[2]
-        ang4=konst*Pose[3]
-        ang5=konst*Pose[4]
-        ang6=konst*Pose[5]
-        final_length = [float(x) for x in final_length]
-        print("\n Platform Poses: ",ang1,ang2,ang3,ang4,ang5,ang6)
-        print("\n\n FINAL SOLUTION: ",final_length)
-        np.savetxt('results.txt', results, fmt='%f') #The file records the whole motion
-        #time.sleep(1)
-
-def TargGenSMo(model):
-
-    target_length = np.zeros(6)
-
+    J = model.get_jacobian(pose.unsqueeze(0)).cpu().numpy()  # [6,6]
     try:
-        f = open('target_length.txt') #here is your target position file(should refer the workspce)
-        matrix = f.read().split()
-        target_length[0] = matrix[0]
-        target_length[1] = matrix[1]
-        target_length[2] = matrix[2]
-        target_length[3] = matrix[3]
-        target_length[4] = matrix[4]
-        target_length[5] = matrix[5]
-    except:
-        print("Oops!  Cannot find the target file.")
+        condJ = float(np.linalg.cond(J))
+    except np.linalg.LinAlgError:
+        condJ = float("inf")
 
-    VTGS(target_length[0], target_length[1], target_length[2], target_length[3], target_length[4], target_length[5], 0,0,0,0,0,0, model)
+    e_str = " ".join(f"{v:+.4f}" for v in e_set)
+    print("[info] --- Setpoint IK check (geometry) ---")
+    print(f"[info] IK leg lengths (mm): {np.array2string(L_ik, precision=4, separator=', ')}")
+    print(f"[info] e_set = IK - target (mm): [{e_str}]")
+    print(f"[info] Metrics: RMSE={rmse:.4f}  MAE={mae:.4f}  MaxAbs={mabs:.4f}  L2={l2:.4f}  cond(J)={condJ:.2e}")
 
-if __name__ == "__main__":
-    model = PMP(num_legs=6)
-    model.load_state_dict(torch.load('best_model.pth'))
-    #model.load_state_dict(torch.load('best_model.pth', map_location=torch.device('cpu')))# Load the model on CPU
-    TargGenSMo(model)
+    # write setpoint_table.csv
+    mapping = "JT" if args.use_jt else "DLS"
+    kp_or_vec = ("vec" if args.kp_vec is not None else f"{args.kp}")
+    row = {
+        "tar_L": np.array(target_lengths, dtype=float),
+        "ik_L":  L_ik.astype(float),
+        "e_set": e_set.astype(float),
+        "RMSE": rmse, "MAE": mae, "MaxAbs": mabs, "L2": l2, "condJ": condJ,
+        "pose": pose.cpu().numpy().astype(float),
+        "mapping": mapping, "kp_or_vec": kp_or_vec, "lam2": float(args.lam2),
+        "bq_diag": list(args.bq_diag), "kq": list(args.kq),
+        "dt": float(args.dt), "steps": int(args.steps), "submv_T": float(args.submv_T),
+        "traj": args.traj, "model": args.model
+    }
+    _append_row_to_table(row, fname="setpoint_table.csv")
+
+    print("[info] Files saved: results_head.csv, setpoint_table.csv")
+    return pose.cpu().numpy(), L_cur
+
+def _csv_head():
+    return ("time,"+",".join([f"L{i+1}" for i in range(6)])+","+
+            ",".join([f"Lref{i+1}" for i in range(6)])+","+
+            ",".join([f"F{i+1}" for i in range(6)])+","+
+            ",".join([f"qdot{i+1}" for i in range(6)])+",x,y,z,roll,pitch,yaw")
+def _meta(a):
+    return (f"# meta: model={a.model}, steps={a.steps}, dt={a.dt}, traj={a.traj}, "
+            f"kp={'vec' if a.kp_vec else a.kp}, use_jt={a.use_jt}, lam2={a.lam2}, "
+            f"bq={list(a.bq_diag)}, kq={list(a.kq)}, "
+            f"geom(baseR={BASE_RADIUS_DEF},platR={PLATFORM_RADIUS_DEF},zPlat={Z_PLATFORM_DEF}), "
+            f"pose0={list(a.pose0)}, pose_ref={list(a.pose_ref) if a.pose_ref else None})")
+
+# ===== CLI =====
+def _parser():
+    ap=argparse.ArgumentParser()
+    ap.add_argument("--model",type=str,default="best_model.pth")
+    ap.add_argument("--target",type=float,nargs=6,default=[415.46, 433.71, 465.28, 484.94, 455.51, 463.25])
+    ap.add_argument("--pose0",type=float,nargs=6,default=POSE0_DEFAULT)
+    ap.add_argument("--pose-ref",dest="pose_ref",type=float,nargs=6)
+    ap.add_argument("--steps",type=int,default=ITERATION_DEFAULT)
+    ap.add_argument("--dt",type=float,default=DT_DEFAULT)
+    ap.add_argument("--submv-T",dest="submv_T",type=float,default=SUBMV_T_DEFAULT)
+    ap.add_argument("--traj",choices=["minjerk","vtgs"],default=TRAJ_DEF)
+    ap.add_argument("--kp",type=float,default=KP_DEF_SCALAR)
+    ap.add_argument("--kp-vec",type=float,nargs=6)
+    ap.add_argument("--use-jt",action="store_true")
+    ap.add_argument("--lam2",type=float,default=LAM2_DEFAULT)
+    ap.add_argument("--bq-diag",type=float,nargs=6,default=BQ_DIAG_DEFAULT)
+    ap.add_argument("--kq",type=float,nargs=6,default=KQ_DEFAULT)
+    return ap
+
+def main():
+    torch.set_default_dtype(torch.float32)
+    a=_parser().parse_args()
+    dev=torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    m=PMP().to(dev); m.load_state_dict(torch.load(a.model,map_location="cpu")); m.eval()
+    print(f"[info] Using device: {dev}")
+    print(f"[info] Model: {a.model}")
+    print(f"[info] Geometry baseR={BASE_RADIUS_DEF}, platR={PLATFORM_RADIUS_DEF}, zPlat={Z_PLATFORM_DEF}")
+    print(f"[info] Steps={a.steps} dt={a.dt} traj={a.traj}")
+    print(f"[info] Mapping={'J^T' if a.use_jt else 'DLS'} lam2={a.lam2}")
+    print(f"[info] Gains kp={a.kp} bq={a.bq_diag} kq={a.kq}")
+    print(f"[info] pose0={a.pose0}")
+    run_controller(m,a,np.array(a.target))
+    print("[info] done.")
+
+if __name__=="__main__": main()
