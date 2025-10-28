@@ -13,6 +13,7 @@ leg_lengths = data(:, 7:12);
  title('Platform Height Over Time');
  xlabel('Time (Iterations)');
  ylabel('Platform Height (mm)');
+ xlim([0 1000]);  % Adjust this range based on data
  % legend('Platform Height');
  grid on;
 
@@ -22,6 +23,7 @@ leg_lengths = data(:, 7:12);
  title('Poses (Euler) Over Time');
  xlabel('Time (Iterations)');
  ylabel('Euler Angles (degrees)');
+ xlim([0 1000]);  % Adjust this range based on data
  legend('Roll', 'Pitch', 'Yaw');
  grid on;
 
@@ -31,6 +33,7 @@ leg_lengths = data(:, 7:12);
  title('Leg Lengths Over Time');
  xlabel('Time (Iterations)');
  ylabel('Leg Lengths (mm)');
+ xlim([0 1000]);  % Adjust this range based on data
  legend('Leg 1', 'Leg 2', 'Leg 3', 'Leg 4', 'Leg 5', 'Leg 6');
  grid on;
 
