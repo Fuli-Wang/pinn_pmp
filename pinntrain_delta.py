@@ -93,7 +93,7 @@ def custom_loss(pred_lengths: torch.Tensor, platform_points_global: torch.Tensor
     return geo_loss + w_stroke * stroke_penalty
 
 # ================== Data for training ==================
-def synthesize_poses(n: int = 200000) -> np.ndarray:
+def synthesize_poses(n: int = 300000) -> np.ndarray:
     """
     合成 (tx,ty,tz)[mm]：
       x,y ∈ [-150,150], z ∈ [-500,-100]  (Delta: 基座在上, 平台在下)
@@ -187,3 +187,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
