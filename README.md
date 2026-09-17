@@ -1,3 +1,12 @@
+This work has since been substantially reformulated, standardised, and extended into **KS-MP (Kinematic–Synergy Motor Primitives)**, a unified motor-primitive framework designed to support control across different robot morphologies.
+
+The latest implementation is available here:
+
+**[KS-MP: Kinematic–Synergy Motor Primitives](https://github.com/Fuli-Wang/KS-MP)**
+
+Compared with KS-MP, the implementation in this repository is less standardised in its control formulation, software structure, cross-morphology applicability, and overall control performance. It therefore no longer represents the current version of our framework and **will not receive further updates or maintenance**.
+
+
 # pinn_pmp
 Passive motion paradigm for parallel robots using self-supervised physics-informed neural networks
 
