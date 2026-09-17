@@ -45,8 +45,7 @@ Back in the visualization folder, the results can be plotted:
 
 ## Citation
 
-For the structure-informed learned body schema and its physics-informed
-training formulation, cite:
+If this work is helpful, please cite:
 
 ```bibtex
 @article{wang2026physicsinformed,
