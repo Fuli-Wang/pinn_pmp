@@ -33,3 +33,22 @@ Back in the visualization folder, the results can be plotted:
     plot_result.m
 
 ![result](visualization/result.png)
+
+## Citation
+
+For the structure-informed learned body schema and its physics-informed
+training formulation, cite:
+
+```bibtex
+@article{wang2026physicsinformed,
+  author  = {Fuli Wang and Fazair Nizar Siraj and Windo Hutabarat and Ashutosh Tiwari},
+  title   = {Physics-Informed Passive Motion Paradigm for Parallel Robots:
+             A High-Precision Motor-Primitives Framework},
+  journal = {IEEE Robotics and Automation Letters},
+  volume  = {11},
+  number  = {2},
+  pages   = {1874--1881},
+  year    = {2026},
+  doi     = {10.1109/LRA.2025.3645663}
+}
+```
