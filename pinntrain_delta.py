@@ -22,7 +22,6 @@ w_stroke = 0.0
 # ================== Delta geometry ==================
 def load_geometry_KR3D1200() -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    返回:
       base_points:   [3,3] (mm)
       plat_local:    [3,3]
     """
